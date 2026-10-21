@@ -538,6 +538,13 @@ test "spawn applies every layer, and a spawned process cannot connect to a remot
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, term);
 }
 
+test "a text substitution in an owned directory shows the program new content and leaves the host file alone" {
+    var scratch = try scratchRoot();
+    defer scratch.cleanup();
+    const term = try runProbeWithRoot("spawn-owned-directory", scratch.path());
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, term);
+}
+
 test "spawn gives the sandboxed process /dev/null on standard input, never a terminal" {
     // No terminal, so a password prompt fails fast. It also closes ioctl(0, TIOCSTI),
     // which no Landlock rule covers on a descriptor open before the sandbox existed.

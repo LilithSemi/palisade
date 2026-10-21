@@ -1747,6 +1747,11 @@ fn applyLayers(
     ) catch |err|
         dieNamespace(write_fd, config.stderr_fd, .mount_tree, err, diag);
 
+    for (config.owned_directories) |owned| {
+        _ = namespace.ownDirectory(allocator, config.root, owned, &diag) catch |err|
+            dieNamespace(write_fd, config.stderr_fd, .mount_tree, err, diag);
+    }
+
     namespace.substitute(allocator, config.root, config.substitutions, &diag) catch |err|
         dieNamespace(write_fd, config.stderr_fd, .mount_tree, err, diag);
 

@@ -75,6 +75,8 @@ pub const Channel = struct {
 
 pub const max_channels = 8;
 
+pub const max_owned_directories = 8;
+
 pub fn channelFd(index: usize) i32 {
     std.debug.assert(index < max_channels);
     return 3 + @as(i32, @intCast(index));
@@ -117,6 +119,9 @@ pub const Config = struct {
     scratch: []const namespace.Scratch = &.{},
     /// A substituted path needs a matching Landlock rule in `rules`, or the program cannot read it.
     substitutions: []const namespace.Substitution = &.{},
+    /// Palisade puts a tmpfs overlay on each target before it applies substitutions, so writes to the target go to memory.
+    /// A text substitution writes into the tree under root, so put its target in an owned directory when that tree is a bind of the host.
+    owned_directories: []const namespace.OwnedDirectory = &.{},
     /// The bytes a reader gets from a `.deny` mount.
     deny_notice: []const u8 = namespace.default_deny_notice,
     network: Network = .none,
@@ -190,6 +195,15 @@ pub const Config = struct {
         }
         out.substitutions = substitutions;
 
+        const owned_directories = try allocator.alloc(namespace.OwnedDirectory, self.owned_directories.len);
+        for (self.owned_directories, owned_directories) |from, *to| {
+            to.* = .{
+                .target = try allocator.dupe(u8, from.target),
+                .remove = try copyStrings(allocator, from.remove),
+            };
+        }
+        out.owned_directories = owned_directories;
+
         out.network = switch (self.network) {
             .none, .host => self.network,
             .isolated => |params| blk: {
@@ -235,6 +249,7 @@ pub const ConfigError = error{
     HelperAllowsEscape,
     HelperCapabilityInvalid,
     HelperFdInvalid,
+    OwnedDirectoryInvalid,
 };
 
 pub const max_keep_fds = 8;
@@ -253,6 +268,13 @@ fn keepFdsValid(helper: Helper, channel_count: usize) bool {
     return true;
 }
 
+fn ownedPathValid(path: []const u8) bool {
+    if (path.len == 0 or path[0] != '/') return false;
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| if (std.mem.eql(u8, part, "..")) return false;
+    return true;
+}
+
 /// Refuses a config that no driver can run safely.
 pub fn validate(config: Config) ConfigError!void {
     if (config.containment == .best_effort and
@@ -261,6 +283,16 @@ pub fn validate(config: Config) ConfigError!void {
         return error.InvalidCgroupPrefix;
     }
     if (config.channels.len > max_channels) return error.TooManyChannels;
+    if (config.owned_directories.len > max_owned_directories) return error.OwnedDirectoryInvalid;
+    for (config.owned_directories) |owned| {
+        if (!ownedPathValid(owned.target) or std.mem.eql(u8, owned.target, "/")) return error.OwnedDirectoryInvalid;
+        for (owned.remove) |name| {
+            if (!ownedPathValid(name)) return error.OwnedDirectoryInvalid;
+            if (name.len <= owned.target.len + 1 or
+                !std.mem.startsWith(u8, name, owned.target) or
+                name[owned.target.len] != '/') return error.OwnedDirectoryInvalid;
+        }
+    }
     if (config.channels.len > 0 or config.helpers.len > 0) {
         if (config.network != .isolated) return error.ChannelWithoutIsolation;
     }
@@ -1024,6 +1056,7 @@ pub const Inexpressible = enum {
     scratch_area,
     channels,
     substitution,
+    owned_directory,
 
     pub fn text(self: Inexpressible) []const u8 {
         return switch (self) {
@@ -1034,16 +1067,23 @@ pub const Inexpressible = enum {
             .scratch_area => "a capped writable area, and an ordinary user on macos cannot mount a filesystem",
             .channels => "channels or helpers, and macos has no network namespace to give them",
             .substitution => "a file swapped for other content, and macos cannot mount over a path",
+            .owned_directory => "a directory owned by the sandbox, and macos cannot mount over a path",
         };
     }
 };
 
 pub fn inexpressible(config: Config) ?Inexpressible {
     if (builtin.os.tag != .macos) return null;
+    return inexpressibleOnDarwin(config);
+}
+
+/// What macOS would refuse, whatever the host is.
+pub fn inexpressibleOnDarwin(config: Config) ?Inexpressible {
     if (!std.mem.eql(u8, config.root, "/")) return .root_is_not_the_real_root;
     if (config.scratch.len != 0) return .scratch_area;
     if (config.channels.len != 0 or config.helpers.len != 0) return .channels;
     if (config.substitutions.len != 0) return .substitution;
+    if (config.owned_directories.len != 0) return .owned_directory;
     for (config.mounts) |mount| switch (mount) {
         .bind => |bind| if (!std.mem.eql(u8, bind.source, bind.target)) return .bind_moves_a_path,
         .overlay => return .overlay_mount,
@@ -1104,6 +1144,39 @@ test "validate refuses a channel without an isolated network" {
 test "validate accepts a plain config" {
     const config: Config = .{ .root = "/", .cwd = "/", .env = &.{}, .mounts = &.{}, .rules = &.{} };
     try validate(config);
+}
+
+fn ownedConfig(owned: []const namespace.OwnedDirectory) Config {
+    return .{ .root = "/", .cwd = "/", .env = &.{}, .mounts = &.{}, .rules = &.{}, .owned_directories = owned };
+}
+
+test "validate accepts an owned directory with removals under its target" {
+    try validate(ownedConfig(&.{.{ .target = "/etc", .remove = &.{ "/etc/hosts", "/etc/ssl/certs" } }}));
+}
+
+test "validate refuses an owned directory target that is relative, the root, or has a parent component" {
+    for ([_][]const u8{ "etc", "/", "/etc/../root", "/..", "" }) |target| {
+        try std.testing.expectError(
+            error.OwnedDirectoryInvalid,
+            validate(ownedConfig(&.{.{ .target = target }})),
+        );
+    }
+}
+
+test "validate refuses a removal outside the target of its owned directory" {
+    for ([_][]const u8{ "/etc", "/etcetera/hosts", "/var/hosts", "/etc/", "/etc/../hosts" }) |name| {
+        try std.testing.expectError(
+            error.OwnedDirectoryInvalid,
+            validate(ownedConfig(&.{.{ .target = "/etc", .remove = &.{name} }})),
+        );
+    }
+}
+
+test "validate refuses more owned directories than max_owned_directories" {
+    var many: [max_owned_directories + 1]namespace.OwnedDirectory = undefined;
+    @memset(&many, .{ .target = "/etc" });
+    try std.testing.expectError(error.OwnedDirectoryInvalid, validate(ownedConfig(&many)));
+    try validate(ownedConfig(many[0..max_owned_directories]));
 }
 
 test "validate refuses a cgroup prefix that is empty or has no dot" {
@@ -1641,6 +1714,7 @@ test "a copied config shares no memory with the original, scratch and substituti
         .rules = &.{.{ .path = "/work", .access = .{ .read_file = true } }},
         .scratch = &.{ .{ .target = "/run/palisade/scratch" }, .{ .target = "/run/palisade/tasks" } },
         .substitutions = &.{.{ .text = .{ .target = "/etc/hosts", .contents = "127.0.0.1 localhost\n" } }},
+        .owned_directories = &.{.{ .target = "/etc", .remove = &.{ "/etc/hosts", "/etc/resolv.conf" } }},
         .deny_notice = "denied\n",
         .network = .{ .isolated = test_params },
         .cwd = "/",
@@ -1677,6 +1751,18 @@ test "a copied config shares no memory with the original, scratch and substituti
 
     try std.testing.expectEqualStrings(original.substitutions[0].text.contents, copied.substitutions[0].text.contents);
     try std.testing.expect(original.substitutions[0].text.contents.ptr != copied.substitutions[0].text.contents.ptr);
+
+    try std.testing.expect(original.owned_directories.ptr != copied.owned_directories.ptr);
+    try std.testing.expectEqual(original.owned_directories.len, copied.owned_directories.len);
+    for (original.owned_directories, copied.owned_directories) |from, to| {
+        try std.testing.expectEqualStrings(from.target, to.target);
+        try std.testing.expect(from.target.ptr != to.target.ptr);
+        try std.testing.expect(from.remove.ptr != to.remove.ptr);
+        for (from.remove, to.remove) |from_name, to_name| {
+            try std.testing.expectEqualStrings(from_name, to_name);
+            try std.testing.expect(from_name.ptr != to_name.ptr);
+        }
+    }
 
     try std.testing.expectEqualStrings(original.deny_notice, copied.deny_notice);
     try std.testing.expect(original.deny_notice.ptr != copied.deny_notice.ptr);
@@ -1807,7 +1893,6 @@ test "inexpressible is null on linux, whatever the config asks for" {
 }
 
 test "inexpressible names the first thing macos cannot give" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     var dummy: u8 = 0;
     const channel: Channel = .{ .ptr = &dummy, .serve = .{ .call = testServe, .max_requests = 1 }, .hands_host_descriptor = false };
     const config: Config = .{
@@ -1819,7 +1904,7 @@ test "inexpressible names the first thing macos cannot give" {
         .network = .{ .isolated = test_params },
         .channels = &.{channel},
     };
-    try std.testing.expectEqual(Inexpressible.channels, inexpressible(config).?);
+    try std.testing.expectEqual(Inexpressible.channels, inexpressibleOnDarwin(config).?);
 }
 
 test "darwin guarantees lack bind_mounts" {
@@ -1836,32 +1921,31 @@ test "confinedAlready is false off macos" {
 }
 
 test "inexpressible names each layer macos has not got" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const base: Config = .{ .root = "/", .mounts = &.{}, .rules = &.{}, .cwd = "/", .env = &.{} };
 
     var moved = base;
     moved.mounts = &.{.{ .bind = .{ .source = "/work/checkout", .target = "/home/me/project" } }};
-    try std.testing.expectEqual(Inexpressible.bind_moves_a_path, inexpressible(moved).?);
+    try std.testing.expectEqual(Inexpressible.bind_moves_a_path, inexpressibleOnDarwin(moved).?);
 
     var overlaid = base;
     overlaid.mounts = &.{.{ .overlay = .{ .lower = "/l", .upper = "/u", .work = "/w", .target = "/t" } }};
-    try std.testing.expectEqual(Inexpressible.overlay_mount, inexpressible(overlaid).?);
+    try std.testing.expectEqual(Inexpressible.overlay_mount, inexpressibleOnDarwin(overlaid).?);
 
     var procfs = base;
     procfs.mounts = &.{.{ .proc = .{} }};
-    try std.testing.expectEqual(Inexpressible.proc_mount, inexpressible(procfs).?);
+    try std.testing.expectEqual(Inexpressible.proc_mount, inexpressibleOnDarwin(procfs).?);
 
     var rooted = base;
     rooted.root = "/tmp/some/root";
-    try std.testing.expectEqual(Inexpressible.root_is_not_the_real_root, inexpressible(rooted).?);
+    try std.testing.expectEqual(Inexpressible.root_is_not_the_real_root, inexpressibleOnDarwin(rooted).?);
 
     var scratched = base;
     scratched.scratch = &.{.{ .target = "/run/palisade/scratch" }};
-    try std.testing.expectEqual(Inexpressible.scratch_area, inexpressible(scratched).?);
+    try std.testing.expectEqual(Inexpressible.scratch_area, inexpressibleOnDarwin(scratched).?);
 
     var identity = base;
     identity.mounts = &.{.{ .bind = .{ .source = "/nix/store/x", .target = "/nix/store/x", .read_only = true } }};
-    try std.testing.expectEqual(@as(?Inexpressible, null), inexpressible(identity));
+    try std.testing.expectEqual(@as(?Inexpressible, null), inexpressibleOnDarwin(identity));
 }
 
 test "inexpressible stays null on linux for a config that swaps a file" {
@@ -1882,7 +1966,6 @@ test "inexpressible stays null on linux for a config that swaps a file" {
 }
 
 test "inexpressible names a substitution on macos" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const config: Config = .{
         .root = "/",
         .cwd = "/",
@@ -1891,7 +1974,36 @@ test "inexpressible names a substitution on macos" {
         .rules = &.{},
         .substitutions = &.{.{ .hide = "/etc/secret" }},
     };
-    try std.testing.expectEqual(Inexpressible.substitution, inexpressible(config).?);
+    try std.testing.expectEqual(Inexpressible.substitution, inexpressibleOnDarwin(config).?);
+}
+
+test "inexpressible names an owned directory, and stays null on linux" {
+    const config: Config = .{
+        .root = "/",
+        .cwd = "/",
+        .env = &.{},
+        .mounts = &.{},
+        .rules = &.{},
+        .owned_directories = &.{.{ .target = "/etc" }},
+    };
+    try std.testing.expectEqual(Inexpressible.owned_directory, inexpressibleOnDarwin(config).?);
+    if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(?Inexpressible, null), inexpressible(config));
+    try std.testing.expectEqualStrings(
+        "a directory owned by the sandbox, and macos cannot mount over a path",
+        Inexpressible.owned_directory.text(),
+    );
+}
+
+test "inexpressibleOnDarwin is null for a plain config, and inexpressible follows the host" {
+    const plain: Config = .{ .root = "/", .cwd = "/", .env = &.{}, .mounts = &.{}, .rules = &.{} };
+    try std.testing.expectEqual(@as(?Inexpressible, null), inexpressibleOnDarwin(plain));
+    try std.testing.expectEqual(@as(?Inexpressible, null), inexpressible(plain));
+    if (builtin.os.tag == .linux) {
+        var scratched = plain;
+        scratched.scratch = &.{.{ .target = "/run/palisade/scratch" }};
+        try std.testing.expectEqual(@as(?Inexpressible, null), inexpressible(scratched));
+        try std.testing.expectEqual(Inexpressible.scratch_area, inexpressibleOnDarwin(scratched).?);
+    }
 }
 
 test "Config.copy copies the allowed calls of a helper" {

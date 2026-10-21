@@ -21,6 +21,9 @@ const named_ungranted = "/etc/palisade-probe-secret";
 
 const named_granted = "/nix/store";
 
+const owned_host_contents = "host contents\n";
+const owned_replacement = "127.0.0.1 sandbox\n";
+
 /// Ends `spawned-kill-the-reader`. One system call, since this runs in a signal handler.
 fn endOnAlarm(_: linux.SIG) callconv(.c) void {
     linux.exit(alarm_exit_status);
@@ -670,6 +673,7 @@ fn runOperation(init: std.process.Init.Minimal) !u8 {
         std.mem.eql(u8, args[1], "spawn-default-signal") or
         std.mem.eql(u8, args[1], "spawn-keeper-reaps") or
         std.mem.eql(u8, args[1], "spawn-stdin-devnull") or
+        std.mem.eql(u8, args[1], "spawn-owned-directory") or
         std.mem.eql(u8, args[1], "spawn-stdin-pipe") or
         std.mem.eql(u8, args[1], "spawn-proc-mask") or
         std.mem.eql(u8, args[1], "spawn-proc-live") or
@@ -1473,6 +1477,17 @@ fn runOperation(init: std.process.Init.Minimal) !u8 {
             if (cap_errno == .INVAL) break; // A kernel older than CAP.LAST_CAP: nothing above this exists.
             if (cap_errno != .SUCCESS) return 5;
             if (rc != 0) return 1; // Still in the bounding set. The drop did not run, or did not finish.
+        }
+        return 0;
+    }
+    if (std.mem.eql(u8, args[1], "spawned-owned-directory")) {
+        for ([_][*:0]const u8{ "/etc/hosts", "/etc/resolv.conf" }) |path| {
+            const fd_rc = linux.open(path, .{ .ACCMODE = .RDONLY }, 0);
+            if (linux.errno(fd_rc) != .SUCCESS) return 5;
+            const fd: i32 = @intCast(fd_rc);
+            defer _ = linux.close(fd);
+            var buffer: [128]u8 = undefined;
+            if (!std.mem.eql(u8, readToEnd(fd, &buffer), owned_replacement)) return 1;
         }
         return 0;
     }
@@ -2741,6 +2756,49 @@ fn runOperation(init: std.process.Init.Minimal) !u8 {
         }, &.{ "/probe", "spawned-caps-drop" }, .{});
 
         return reportChildTerm(term);
+    }
+    if (std.mem.eql(u8, args[1], "spawn-owned-directory")) {
+        const host_dir = try std.fs.path.join(arena, &.{ root_arg, ".host-etc" });
+        try makeTestDir(arena, host_dir);
+        const host_file = try std.fs.path.join(arena, &.{ host_dir, "hosts" });
+        try writeTestFile(arena, host_file, owned_host_contents);
+
+        const base = try baseEscapeConfig(arena);
+        const mounts = try arena.alloc(namespace.Mount, base.mounts.len + 1);
+        @memcpy(mounts[0..base.mounts.len], base.mounts);
+        mounts[base.mounts.len] = .{ .bind = .{ .source = host_dir, .target = "/etc", .read_only = true } };
+        const rules = try arena.alloc(sandbox.Rule, base.rules.len + 1);
+        @memcpy(rules[0..base.rules.len], base.rules);
+        rules[base.rules.len] = .{ .path = "/etc", .access = landlock.AccessFs.read_only };
+
+        const term = try sandbox.spawn(arena, .{
+            .root = root_arg,
+            .mounts = mounts,
+            .rules = rules,
+            .cwd = "/",
+            .env = &.{},
+            .network = .none,
+            .substitutions = &.{
+                .{ .text = .{ .target = "/etc/hosts", .contents = owned_replacement } },
+                .{ .text = .{ .target = "/etc/resolv.conf", .contents = owned_replacement } },
+            },
+            .owned_directories = &.{.{ .target = "/etc", .remove = &.{"/etc/hosts"} }},
+        }, &.{ "/probe", "spawned-owned-directory" }, .{});
+        switch (term) {
+            .exited => |code| if (code != 0) return 4,
+            else => return 4,
+        }
+
+        const host_path = try arena.dupeSentinel(u8, host_file, 0);
+        const fd_rc = linux.open(host_path.ptr, .{ .ACCMODE = .RDONLY }, 0);
+        if (linux.errno(fd_rc) != .SUCCESS) return 5;
+        const fd: i32 = @intCast(fd_rc);
+        defer _ = linux.close(fd);
+        var buffer: [128]u8 = undefined;
+        const kept = readToEnd(fd, &buffer);
+        if (!std.mem.eql(u8, kept, owned_host_contents)) return 6;
+        const extra = try std.fs.path.joinZ(arena, &.{ host_dir, "resolv.conf" });
+        return if (linux.errno(linux.open(extra.ptr, .{ .ACCMODE = .RDONLY }, 0)) == .NOENT) 0 else 7;
     }
     if (std.mem.eql(u8, args[1], "spawn-stdin-devnull")) {
         const base = try baseEscapeConfig(arena);

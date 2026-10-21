@@ -12,6 +12,8 @@ pub const linux = struct {
     pub const netns = @import("palisade/linux/netns.zig");
     pub const capabilities = @import("palisade/linux/capabilities.zig");
     pub const cgroup = @import("palisade/linux/cgroup.zig");
+    pub const guarantees = @import("palisade/linux/caps.zig").guarantees;
+    pub const expresses = @import("palisade/linux/caps.zig").expresses;
 };
 
 pub const Sandbox = @import("palisade/Sandbox.zig");
@@ -19,6 +21,8 @@ pub const Sandbox = @import("palisade/Sandbox.zig");
 pub const darwin = struct {
     pub const limits = @import("palisade/darwin/limits.zig");
     pub const seatbelt = @import("palisade/darwin/seatbelt.zig");
+    pub const guarantees = @import("palisade/darwin/caps.zig").guarantees;
+    pub const expresses = @import("palisade/darwin/caps.zig").expresses;
 };
 
 test {
@@ -39,4 +43,10 @@ test {
     _ = darwin.seatbelt;
     _ = @import("palisade/darwin/driver.zig");
     _ = @import("palisade/darwin/afterfork.zig");
+}
+
+test "the per driver guarantees are exported on any host" {
+    const std = @import("std");
+    try std.testing.expect(!darwin.guarantees.contains(.bind_mounts));
+    try std.testing.expect(linux.guarantees.contains(.bind_mounts));
 }
