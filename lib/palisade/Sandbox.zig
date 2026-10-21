@@ -54,9 +54,9 @@ pub const Channel = struct {
     /// Host-initiated traffic: Palisade polls `fd` and calls `drain` when it is readable.
     /// Drains have no cap: the sandbox cannot drive their rate.
     wakeup: ?Wakeup = null,
-    /// True when the channel passes a real host socket into the child. Then the
-    /// child may not call connect, so it cannot aim that socket at a new
-    /// address. No default: each channel must state it.
+    /// True when the channel passes a real host socket into the child. One such
+    /// channel blocks connect for the whole sandboxed process. Other channels
+    /// in the same sandbox may still be false. No default: each channel must state it.
     hands_host_descriptor: bool,
 
     pub const Serve = struct {
@@ -238,6 +238,8 @@ pub const Config = struct {
     }
 };
 
+/// One channel that hands a host descriptor blocks connect for the whole sandboxed process.
+/// The caller's own block_connect setting is ORed with this result.
 pub fn blocksConnect(config: Config) bool {
     for (config.channels) |channel| {
         if (channel.hands_host_descriptor) return true;
@@ -251,7 +253,6 @@ pub const ConfigError = error{
     ChannelWithoutIsolation,
     HelperChannelOutOfRange,
     InvalidCgroupPrefix,
-    ChannelsDisagreeOnDescriptor,
     ChannelWithoutCallback,
     ChannelWithoutBudget,
     HelperAllowsEscape,
@@ -305,9 +306,6 @@ pub fn validate(config: Config) ConfigError!void {
         if (config.network == .host) return error.ChannelWithoutIsolation;
     }
     for (config.channels) |channel| {
-        if (channel.hands_host_descriptor != config.channels[0].hands_host_descriptor) {
-            return error.ChannelsDisagreeOnDescriptor;
-        }
         if (channel.serve == null and channel.wakeup == null) return error.ChannelWithoutCallback;
         if (channel.serve) |serve| {
             if (serve.max_requests == 0) return error.ChannelWithoutBudget;
@@ -1250,7 +1248,7 @@ test "validate accepts a channel and a helper with network none" {
     try validate(config);
 }
 
-test "validate refuses channels that disagree on handing a host descriptor" {
+test "validate accepts a mix of brokered and routed channels" {
     var dummy: u8 = 0;
     const routed: Channel = .{ .ptr = &dummy, .serve = .{ .call = testServe, .max_requests = 1 }, .hands_host_descriptor = false };
     const brokered: Channel = .{ .ptr = &dummy, .serve = .{ .call = testServe, .max_requests = 1 }, .hands_host_descriptor = true };
@@ -1263,7 +1261,8 @@ test "validate refuses channels that disagree on handing a host descriptor" {
         .network = .{ .isolated = test_params },
         .channels = &.{ routed, brokered },
     };
-    try std.testing.expectError(error.ChannelsDisagreeOnDescriptor, validate(config));
+    try validate(config);
+    try std.testing.expect(blocksConnect(config));
 }
 
 test "validate refuses a channel with neither serve nor wakeup" {
