@@ -3,6 +3,7 @@
 //! own effective, permitted, and inheritable sets.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const linux = std.os.linux;
 const namespace = @import("namespace.zig");
 
@@ -133,6 +134,7 @@ fn dropAllBut(keep: ?u32, diag: ?*?Diagnostic) Error!void {
 }
 
 test "dropAll clears effective, permitted, and inheritable, in a fresh user namespace" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     const fork_rc = linux.fork();
     if (linux.errno(fork_rc) != .SUCCESS) return error.SkipZigTest;
 
@@ -163,6 +165,7 @@ test "dropAll clears effective, permitted, and inheritable, in a fresh user name
 }
 
 test "keepOnly leaves one capability and takes every other one away" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     const fork_rc = linux.fork();
     if (linux.errno(fork_rc) != .SUCCESS) return error.SkipZigTest;
 

@@ -2,6 +2,7 @@
 //! `fork` copies them from a parent that had other work.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const linux = std.os.linux;
 
 pub fn keepOnlyDescriptors(keep: []const i32) void {
@@ -43,6 +44,7 @@ pub fn resetSignalState() void {
 }
 
 test "a caught signal is back at its default after the reset" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     const ignore = linux.Sigaction{
         .handler = .{ .handler = linux.SIG.IGN },
         .mask = std.mem.zeroes(linux.sigset_t),

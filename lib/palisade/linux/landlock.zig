@@ -132,6 +132,7 @@ fn childRestrictSelf(abi: i32) u8 {
 }
 
 test "probeAbi reports a usable ABI version on a kernel with Landlock" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     const abi = probeAbi() catch {
         return error.SkipZigTest;
     };

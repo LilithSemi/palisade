@@ -1023,6 +1023,7 @@ test "a refusal that is not a missing module fails the test rather than skipping
 }
 
 test "setup reads back the interfaces it brought up" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     const record = try measure(test_params) orelse return error.SkipZigTest;
     if (measuredNothing(record)) return error.SkipZigTest;
     try testing.expectEqual(Measurement.no_failure, record.failed_step);
@@ -1037,6 +1038,7 @@ test "setup reads back the interfaces it brought up" {
 }
 
 test "setup reads back the addresses it asked for" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     const record = try measure(test_params) orelse return error.SkipZigTest;
     if (measuredNothing(record)) return error.SkipZigTest;
     try testing.expectEqual(Measurement.no_failure, record.failed_step);
@@ -1053,6 +1055,7 @@ test "setup reads back the addresses it asked for" {
 }
 
 test "setup reads back a default route that points at the blackhole" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     const record = try measure(test_params) orelse return error.SkipZigTest;
     if (measuredNothing(record)) return error.SkipZigTest;
     try testing.expectEqual(Measurement.no_failure, record.failed_step);
@@ -1071,6 +1074,7 @@ test "setup reads back a default route that points at the blackhole" {
 }
 
 test "the blackhole takes a connection at the socket layer and never completes one" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     const record = try measure(test_params) orelse return error.SkipZigTest;
     if (measuredNothing(record)) return error.SkipZigTest;
     try testing.expectEqual(Measurement.no_failure, record.failed_step);

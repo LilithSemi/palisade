@@ -278,6 +278,8 @@ test "the probe reads the child's answer, and never reads silence as a pass" {
 }
 
 test "the probe answers for this machine, and asks in a child that is spent by asking" {
+    const builtin = @import("builtin");
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     const first = probeAvailability();
     const second = probeAvailability();
     try std.testing.expectEqual(std.meta.activeTag(first), std.meta.activeTag(second));

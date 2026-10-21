@@ -659,6 +659,7 @@ test "prepare builds the profile and the exec arrays before any fork" {
 
 test "a confined child runs a program and reports its exit status" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (seatbelt.confinedAlready()) return error.SkipZigTest;
     var config = test_base;
     config.rules = &.{.{ .path = "/", .access = landlock.AccessFs.read_only }};
     const term = try spawn(std.testing.allocator, config, &.{"/usr/bin/true"}, .{});
