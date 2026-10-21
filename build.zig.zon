@@ -1,0 +1,7 @@
+.{
+    .name = .palisade,
+    .version = "0.1.0",
+    .fingerprint = 0x37146a4efe48e90,
+    .minimum_zig_version = "0.17.0",
+    .paths = .{ "build.zig", "build.zig.zon", "lib", "LICENSE", "README.md" },
+}
