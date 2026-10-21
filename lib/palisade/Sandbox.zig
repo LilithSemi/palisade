@@ -87,14 +87,17 @@ pub const Helper = struct {
     /// Runs in a forked process inside the sandbox namespaces, before pivot_root and without Landlock.
     /// Its filter and its capabilities are its only limits. Palisade installs the filter after it sets
     /// the user and capabilities, then calls run. `run` returns the exit status.
-    run: *const fn (ptr: *anyopaque, channel_fd: ?i32) u8,
+    /// `stderr_fd` is the caller's stderr at the number it has in the helper.
+    run: *const fn (ptr: *anyopaque, channel_fd: ?i32, stderr_fd: i32) u8,
     /// Palisade calls prepare after it closes the other descriptors and before it sets the user,
-    /// capabilities and filter. So prepare runs with the namespace root's capabilities and `allowed`
-    /// does not limit it. Descriptors it opens stay open into run. False makes the helper fail.
-    prepare: ?*const fn (ptr: *anyopaque, channel_fd: ?i32) bool = null,
+    /// capabilities and filter. So `allowed` does not limit it, and it can write to `stderr_fd` without
+    /// `.write`. A helper that prints in run lists `.write`. Descriptors it opens stay open into run.
+    /// False makes the helper fail.
+    prepare: ?*const fn (ptr: *anyopaque, channel_fd: ?i32, stderr_fd: i32) bool = null,
     /// Calls the helper may make. Palisade adds the blocked and refused calls and the other rules of
     /// seccomp.buildHelper, so this list cannot open them. Write and close on the ready descriptor
-    /// are always allowed. Append seccomp.wait_calls for a helper that waits on fds.
+    /// are always allowed. Write to any other descriptor, stderr included, needs `.write` here.
+    /// Append seccomp.wait_calls for a helper that waits on fds.
     /// The mount family is not in the escape set, so a helper that lists mount calls may mount.
     /// With unshare, setns and pivot_root killed, it cannot leave its namespaces.
     /// sendmsg and recvmsg work only on the channel and keep_fds. Other calls in allowed, such as
@@ -244,6 +247,7 @@ pub fn blocksConnect(config: Config) bool {
 
 pub const ConfigError = error{
     TooManyChannels,
+    /// Channels and helpers need a network namespace, so `.host` is refused.
     ChannelWithoutIsolation,
     HelperChannelOutOfRange,
     InvalidCgroupPrefix,
@@ -298,7 +302,7 @@ pub fn validate(config: Config) ConfigError!void {
         }
     }
     if (config.channels.len > 0 or config.helpers.len > 0) {
-        if (config.network != .isolated) return error.ChannelWithoutIsolation;
+        if (config.network == .host) return error.ChannelWithoutIsolation;
     }
     for (config.channels) |channel| {
         if (channel.hands_host_descriptor != config.channels[0].hands_host_descriptor) {
@@ -1130,7 +1134,7 @@ fn testServe(_: *anyopaque, _: i32) Channel.ServeResult {
     return .done;
 }
 
-fn testRun(_: *anyopaque, _: ?i32) u8 {
+fn testRun(_: *anyopaque, _: ?i32, _: i32) u8 {
     return 0;
 }
 
@@ -1138,10 +1142,10 @@ fn testDrain(_: *anyopaque, _: i32) Channel.ServeResult {
     return .more;
 }
 
-test "validate refuses a channel without an isolated network" {
+test "validate refuses a channel on the host network" {
     var dummy: u8 = 0;
     const channel: Channel = .{ .ptr = &dummy, .serve = .{ .call = testServe, .max_requests = 1 }, .hands_host_descriptor = false };
-    const config: Config = .{ .root = "/", .cwd = "/", .env = &.{}, .mounts = &.{}, .rules = &.{}, .channels = &.{channel} };
+    const config: Config = .{ .root = "/", .cwd = "/", .env = &.{}, .mounts = &.{}, .rules = &.{}, .network = .host, .channels = &.{channel} };
     try std.testing.expectError(error.ChannelWithoutIsolation, validate(config));
 }
 
@@ -1231,11 +1235,19 @@ test "validate refuses a helper that names a channel index out of range" {
     try std.testing.expectError(error.HelperChannelOutOfRange, validate(config));
 }
 
-test "validate refuses a helper without an isolated network" {
+test "validate refuses a helper on the host network" {
     var dummy: u8 = 0;
     const helper: Helper = .{ .ptr = &dummy, .run = testRun, .allowed = &.{} };
-    const config: Config = .{ .root = "/", .cwd = "/", .env = &.{}, .mounts = &.{}, .rules = &.{}, .helpers = &.{helper} };
+    const config: Config = .{ .root = "/", .cwd = "/", .env = &.{}, .mounts = &.{}, .rules = &.{}, .network = .host, .helpers = &.{helper} };
     try std.testing.expectError(error.ChannelWithoutIsolation, validate(config));
+}
+
+test "validate accepts a channel and a helper with network none" {
+    var dummy: u8 = 0;
+    const channel: Channel = .{ .ptr = &dummy, .serve = .{ .call = testServe, .max_requests = 1 }, .hands_host_descriptor = false };
+    const helper: Helper = .{ .ptr = &dummy, .run = testRun, .allowed = &.{} };
+    const config: Config = .{ .root = "/", .cwd = "/", .env = &.{}, .mounts = &.{}, .rules = &.{}, .network = .none, .channels = &.{channel}, .helpers = &.{helper} };
+    try validate(config);
 }
 
 test "validate refuses channels that disagree on handing a host descriptor" {

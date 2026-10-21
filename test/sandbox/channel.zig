@@ -179,3 +179,18 @@ test "a helper whose prepare returns false makes the spawn fail with HelperFaile
     try std.testing.expectEqualStrings("HelperFailed\n", result.out());
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
 }
+
+test "a channel works in a sandbox with network none" {
+    var scratch = try scratchRoot();
+    defer scratch.cleanup();
+    const result = try runProbeCapturing(&.{ probe_path, "channel-echo-none", scratch.path() });
+    try expectExitedWith(0, result);
+}
+
+test "a helper writes to the stderr descriptor it is given" {
+    var scratch = try scratchRoot();
+    defer scratch.cleanup();
+    const result = try runProbeCapturing(&.{ probe_path, "channel-helper-stderr", scratch.path() });
+    try std.testing.expectEqualStrings("helper-err\n", result.out());
+    try expectExitedWith(0, result);
+}

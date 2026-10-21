@@ -976,7 +976,7 @@ fn runHelper(
         kept += 1;
     }
     afterfork.keepOnlyDescriptors(keep[0..kept]);
-    if (helper.prepare) |prepare| if (!prepare(helper.ptr, channel_number)) linux.exit_group(1);
+    if (helper.prepare) |prepare| if (!prepare(helper.ptr, channel_number, stderr_fd)) linux.exit_group(1);
 
     // The filter goes on last. It kills capset, setuid and setgid, which the steps before it need.
     becomeHelper(hide, stderr_fd);
@@ -994,7 +994,7 @@ fn runHelper(
     if (linux.errno(said) != .SUCCESS or said != ready.len) linux.exit_group(1);
     if (linux.errno(linux.close(helper_ready_fd)) != .SUCCESS) linux.exit_group(1);
 
-    linux.exit_group(helper.run(helper.ptr, channel_number));
+    linux.exit_group(helper.run(helper.ptr, channel_number, stderr_fd));
 }
 
 const max_scratch_areas = 4;
@@ -2641,7 +2641,7 @@ test "a wakeup-only channel never ends the loop, the process does" {
     try std.testing.expectEqual(@as(usize, 0), probe.calls);
 }
 
-fn rejectedFilterRun(_: *anyopaque, _: ?i32) u8 {
+fn rejectedFilterRun(_: *anyopaque, _: ?i32, _: i32) u8 {
     return 0;
 }
 
