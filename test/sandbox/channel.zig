@@ -163,3 +163,19 @@ test "a helper writes to a descriptor it keeps and cannot reach one it did not k
     try std.testing.expectEqualStrings("kept|", result.out());
     try expectExitedWith(0, result);
 }
+
+test "a descriptor a helper opens in prepare is open in run although socketpair is not allowed" {
+    var scratch = try scratchRoot();
+    defer scratch.cleanup();
+    const result = try runProbeCapturing(&.{ probe_path, "channel-helper-prepare", scratch.path() });
+    try std.testing.expectEqualStrings("ok", result.out());
+    try expectExitedWith(0, result);
+}
+
+test "a helper whose prepare returns false makes the spawn fail with HelperFailed" {
+    var scratch = try scratchRoot();
+    defer scratch.cleanup();
+    const result = try runProbeCapturing(&.{ probe_path, "channel-helper-prepare-fails", scratch.path() });
+    try std.testing.expectEqualStrings("HelperFailed\n", result.out());
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+}

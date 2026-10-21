@@ -627,6 +627,31 @@ fn keepFdRun(_: *anyopaque, _: ?i32) u8 {
     return if (linux.errno(rc) == .SUCCESS) 0 else 1;
 }
 
+const PairState = struct {
+    ends: [2]i32 = .{ -1, -1 },
+};
+
+fn pairPrepare(ptr: *anyopaque, _: ?i32) bool {
+    const state: *PairState = @ptrCast(@alignCast(ptr));
+    const rc = linux.socketpair(linux.AF.UNIX, linux.SOCK.DGRAM, 0, &state.ends);
+    return linux.errno(rc) == .SUCCESS;
+}
+
+fn failPrepare(_: *anyopaque, _: ?i32) bool {
+    return false;
+}
+
+fn pairRun(ptr: *anyopaque, channel_fd: ?i32) u8 {
+    const state: *PairState = @ptrCast(@alignCast(ptr));
+    const fd = channel_fd orelse return 1;
+    if (linux.errno(linux.sendto(state.ends[0], "ok", 2, linux.MSG.NOSIGNAL, null, 0)) != .SUCCESS) return 1;
+    var buffer: [2]u8 = undefined;
+    const got = linux.recvfrom(state.ends[1], &buffer, buffer.len, 0, null, null);
+    if (linux.errno(got) != .SUCCESS) return 1;
+    const sent = linux.sendto(fd, &buffer, got, linux.MSG.NOSIGNAL, null, 0);
+    return if (linux.errno(sent) == .SUCCESS) 0 else 1;
+}
+
 fn outsideCallRun(_: *anyopaque, _: ?i32) u8 {
     _ = linux.getpid();
     return 0;
@@ -722,6 +747,8 @@ fn runOperation(init: std.process.Init.Minimal) !u8 {
         std.mem.eql(u8, args[1], "channel-helper-exit-only") or
         std.mem.eql(u8, args[1], "channel-helper-outside-call") or
         std.mem.eql(u8, args[1], "channel-helper-keep") or
+        std.mem.eql(u8, args[1], "channel-helper-prepare") or
+        std.mem.eql(u8, args[1], "channel-helper-prepare-fails") or
         std.mem.eql(u8, args[1], "connect-out-hands") or
         std.mem.eql(u8, args[1], "connect-out-keeps");
 
@@ -3377,6 +3404,30 @@ fn runOperation(init: std.process.Init.Minimal) !u8 {
         writeStdout("|");
         const leaked = linux.read(unkept[0], &buffer, buffer.len);
         if (linux.errno(leaked) == .SUCCESS) writeStdout(buffer[0..leaked]);
+        return reportChildTerm(term);
+    }
+    if (std.mem.eql(u8, args[1], "channel-helper-prepare") or std.mem.eql(u8, args[1], "channel-helper-prepare-fails")) {
+        const fails = std.mem.eql(u8, args[1], "channel-helper-prepare-fails");
+        var state: PairState = .{};
+        var recorder: Recorder = .{};
+        const channels = [_]sandbox.Channel{.{
+            .ptr = &recorder,
+            .serve = .{ .call = recordServe, .max_requests = 1 },
+            .hands_host_descriptor = false,
+        }};
+        const helpers = [_]sandbox.Helper{.{
+            .ptr = &state,
+            .run = pairRun,
+            .prepare = if (fails) failPrepare else pairPrepare,
+            .allowed = &.{ .sendto, .recvfrom, .exit_group },
+            .channel = 0,
+        }};
+        const term = spawnChannelProgram(arena, root_arg, &channels, &helpers, &.{ "/probe", "spawned-channel-wait" }) catch |err| {
+            writeStdout(@errorName(err));
+            writeStdout("\n");
+            return 0;
+        };
+        writeStdout(recorder.bytes[0..recorder.len]);
         return reportChildTerm(term);
     }
     if (std.mem.eql(u8, args[1], "channel-helper") or std.mem.eql(u8, args[1], "channel-helper-exit-only") or

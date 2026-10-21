@@ -88,6 +88,10 @@ pub const Helper = struct {
     /// Its filter and its capabilities are its only limits. Palisade installs the filter after it sets
     /// the user and capabilities, then calls run. `run` returns the exit status.
     run: *const fn (ptr: *anyopaque, channel_fd: ?i32) u8,
+    /// Palisade calls prepare after it closes the other descriptors and before it sets the user,
+    /// capabilities and filter. So prepare runs with the namespace root's capabilities and `allowed`
+    /// does not limit it. Descriptors it opens stay open into run. False makes the helper fail.
+    prepare: ?*const fn (ptr: *anyopaque, channel_fd: ?i32) bool = null,
     /// Calls the helper may make. Palisade adds the blocked and refused calls and the other rules of
     /// seccomp.buildHelper, so this list cannot open them. Write and close on the ready descriptor
     /// are always allowed. Append seccomp.wait_calls for a helper that waits on fds.

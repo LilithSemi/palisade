@@ -976,6 +976,7 @@ fn runHelper(
         kept += 1;
     }
     afterfork.keepOnlyDescriptors(keep[0..kept]);
+    if (helper.prepare) |prepare| if (!prepare(helper.ptr, channel_number)) linux.exit_group(1);
 
     // The filter goes on last. It kills capset, setuid and setgid, which the steps before it need.
     becomeHelper(hide, stderr_fd);
