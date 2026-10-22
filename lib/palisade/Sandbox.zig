@@ -125,6 +125,8 @@ pub const Config = struct {
     rules: []const Rule,
     scratch: []const namespace.Scratch = &.{},
     /// A substituted path needs a matching Landlock rule in `rules`, or the program cannot read it.
+    /// Without the rule, a read of the file fails with EACCES although the file is there.
+    /// For a `.link`, give the rule to `link_to`. A rule on the link path follows the link and fails when `link_to` is missing.
     substitutions: []const namespace.Substitution = &.{},
     /// Palisade puts a tmpfs overlay on each target before it applies substitutions, so writes to the target go to memory.
     /// A text substitution writes into the tree under root, so put its target in an owned directory when that tree is a bind of the host.
