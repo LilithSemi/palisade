@@ -207,6 +207,7 @@ pub fn spawn(
     run: iface.Run,
 ) SpawnError!std.process.Child.Term {
     try iface.validate(config);
+    if ((run.entry == null) == (argv.len == 0)) return error.Unexpected;
     for (config.helpers) |helper| {
         for (helper.keep_fds) |fd| {
             if (linux.errno(linux.fcntl(fd, linux.F.GETFD, 0)) == .BADF) return error.HelperFdClosed;
@@ -557,7 +558,10 @@ pub fn spawn(
             if (path_record) |record| unmapPathRecord(record);
             applyLayers(allocator, config, abi, child_insns, write_fd, notify_fds[1]);
             armPdeathsig(write_fd, config.stderr_fd, middle_pidfd);
-            execute(allocator, config, argv, write_fd, child_ends[0..channel_count]);
+            if (run.entry) |entry|
+                runEntry(allocator, config, entry, write_fd, child_ends[0..channel_count])
+            else
+                execute(allocator, config, argv, write_fd, child_ends[0..channel_count]);
             unreachable;
         }
 
@@ -2150,6 +2154,35 @@ fn execute(
 
     const exec_rc = linux.execve(argv_z[0].?, argv_z, env_z);
     dieErrno(write_fd, stderr_fd, .exec, "execve", linux.errno(exec_rc));
+}
+
+fn runEntry(
+    allocator: std.mem.Allocator,
+    config: Config,
+    entry: iface.Entry,
+    write_fd_in: i32,
+    channel_ends: []const i32,
+) noreturn {
+    var write_fd = write_fd_in;
+
+    redirectStandardStreams(config, write_fd);
+    const stderr_fd = fileno_stderr;
+
+    const cwd_z = allocator.dupeSentinel(u8, config.cwd, 0) catch |err|
+        die(write_fd, stderr_fd, .exec, err);
+    const chdir_errno = linux.errno(linux.chdir(cwd_z));
+    if (chdir_errno != .SUCCESS) dieErrno(write_fd, stderr_fd, .exec, "chdir", chdir_errno);
+
+    placeChannelFds(channel_ends, &write_fd, &.{}, stderr_fd);
+
+    var limit_diag: ?rlimits.Diagnostic = null;
+    rlimits.apply(config.limits, rlimits.runningKernel(), &limit_diag) catch |err|
+        dieLimit(write_fd, stderr_fd, err, limit_diag);
+
+    // Exec normally closes the setup pipe. A callback has no exec boundary,
+    // so close it explicitly only after all fallible setup is complete.
+    if (linux.errno(linux.close(write_fd)) != .SUCCESS) linux.exit_group(127);
+    linux.exit_group(entry.run(entry.ptr));
 }
 
 fn redirectStandardStreams(config: Config, write_fd: i32) void {

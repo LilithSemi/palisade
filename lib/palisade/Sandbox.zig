@@ -827,9 +827,20 @@ pub const Reports = struct {
     syscall_audit: ?*SyscallAudit = null,
 };
 
+/// Code the native driver may call in the sandboxed process instead of
+/// replacing it with another executable. The target and everything it points
+/// to must remain alive until `spawn` returns.
+pub const Entry = struct {
+    ptr: *anyopaque,
+    run: *const fn (ptr: *anyopaque) u8,
+};
+
 pub const Run = struct {
     handle: ?*Handle = null,
     reports: Reports = .{},
+    /// An entry and an executable are mutually exclusive; pass an empty argv
+    /// when this is set. Remote drivers may refuse entries they cannot carry.
+    entry: ?Entry = null,
 };
 
 /// Caller-owned. Its address must stay fixed from before `spawn` until

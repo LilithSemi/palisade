@@ -81,6 +81,7 @@ pub fn spawn(
     run: iface.Run,
 ) SpawnError!iface.Term {
     try iface.validate(config);
+    if ((run.entry == null) == (argv.len == 0)) return error.Unexpected;
 
     switch (config.containment) {
         .best_effort => {},
@@ -135,7 +136,7 @@ fn spawnDarwin(
     argv: []const []const u8,
     run: iface.Run,
 ) SpawnError!iface.Term {
-    std.debug.assert(argv.len > 0);
+    std.debug.assert((run.entry == null) != (argv.len == 0));
     const handle = run.handle;
 
     var arena_state = std.heap.ArenaAllocator.init(gpa);
@@ -168,7 +169,7 @@ fn spawnDarwin(
     if (a_pid == 0) {
         _ = std.c.close(setup_fds[0]);
         if (cancel_fds[1] >= 0) _ = std.c.close(cancel_fds[1]);
-        runMiddle(config, prepared, setup_fds[1], cancel_fds[0]);
+        runMiddle(config, prepared, run.entry, setup_fds[1], cancel_fds[0]);
     }
 
     _ = std.c.close(setup_fds[1]);
@@ -299,6 +300,7 @@ fn dieSeatbelt(write_fd: std.c.fd_t, stderr_fd: std.c.fd_t, diag: ?seatbelt.Diag
 fn runMiddle(
     config: Config,
     prepared: Prepared,
+    entry: ?iface.Entry,
     write_fd: std.c.fd_t,
     cancel_read_fd: std.c.fd_t,
 ) noreturn {
@@ -310,7 +312,7 @@ fn runMiddle(
     if (b_pid < 0) die(write_fd, config.stderr_fd, .fork, "could not fork the sandboxed process");
     if (b_pid == 0) {
         if (cancel_read_fd >= 0) _ = std.c.close(cancel_read_fd);
-        runProgram(config, prepared, write_fd);
+        runProgram(config, prepared, entry, write_fd);
     }
 
     _ = std.c.close(write_fd);
@@ -397,7 +399,12 @@ fn relay(b_pid: std.c.pid_t) noreturn {
     }
 }
 
-fn runProgram(config: Config, prepared: Prepared, write_fd: std.c.fd_t) noreturn {
+fn runProgram(
+    config: Config,
+    prepared: Prepared,
+    entry: ?iface.Entry,
+    write_fd: std.c.fd_t,
+) noreturn {
     redirectStdin(config, write_fd);
     closeInheritedFds(config, write_fd);
     redirectStandardStreams(config, write_fd);
@@ -414,6 +421,13 @@ fn runProgram(config: Config, prepared: Prepared, write_fd: std.c.fd_t) noreturn
     var diag: ?seatbelt.Diagnostic = null;
     const support = seatbelt.apply(prepared.profile, &diag);
     if (!support.applied()) dieSeatbelt(write_fd, stderr_fd, diag);
+
+    if (entry) |callback| {
+        // Exec normally closes the setup pipe. A callback has no exec
+        // boundary, so close it only after confinement is fully applied.
+        if (std.c.close(write_fd) != 0) std.c._exit(127);
+        std.c._exit(callback.run(callback.ptr));
+    }
 
     _ = std.c.execve(prepared.argv[0].?, prepared.argv.ptr, prepared.env.ptr);
     die(write_fd, stderr_fd, .exec, "execve failed");
@@ -664,4 +678,20 @@ test "a confined child runs a program and reports its exit status" {
     config.rules = &.{.{ .path = "/", .access = landlock.AccessFs.read_only }};
     const term = try spawn(std.testing.allocator, config, &.{"/usr/bin/true"}, .{});
     try std.testing.expectEqual(iface.Term{ .exited = 0 }, term);
+}
+
+fn testEntry(ptr: *anyopaque) u8 {
+    const status: *const u8 = @ptrCast(@alignCast(ptr));
+    return status.*;
+}
+
+test "a confined child can enter inherited code without exec" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    if (seatbelt.confinedAlready()) return error.SkipZigTest;
+
+    var status: u8 = 23;
+    const term = try spawn(std.testing.allocator, test_base, &.{}, .{
+        .entry = .{ .ptr = &status, .run = testEntry },
+    });
+    try std.testing.expectEqual(iface.Term{ .exited = 23 }, term);
 }
