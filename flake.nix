@@ -88,6 +88,12 @@
 
           formatting = treefmtEval.${system}.config.build.check self;
         }
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          selinux = import ./test/selinux.nix {
+            inherit pkgs;
+            source = lib.cleanSource ./.;
+          };
+        }
       );
     };
 }

@@ -7,6 +7,7 @@ const linux = std.os.linux;
 const landlock = @import("landlock.zig");
 const namespace = @import("namespace.zig");
 const capabilities = @import("capabilities.zig");
+const selinux = @import("selinux.zig");
 const seccomp = @import("seccomp.zig");
 const notify = @import("notify.zig");
 const bpf = @import("bpf.zig");
@@ -46,6 +47,7 @@ const SetupStep = enum(u8) {
     mount_tree,
     pivot,
     capabilities,
+    selinux,
     landlock_init,
     landlock_rule,
     landlock_restrict,
@@ -104,6 +106,21 @@ fn testConfig(network: iface.Network, channels: []const iface.Channel) Config {
         .network = network,
         .channels = channels,
     };
+}
+
+fn testEntry(_: *anyopaque) u8 {
+    return 0;
+}
+
+test "an SELinux exec context requires an executable" {
+    var config = testConfig(.none, &.{});
+    config.selinux_context = "system_u:system_r:palisade_t:s0";
+    try std.testing.expectError(error.SelinuxRequiresExec, spawn(
+        std.testing.allocator,
+        config,
+        &.{},
+        .{ .entry = .{ .ptr = &test_state, .run = testEntry } },
+    ));
 }
 
 test "connect is taken away exactly when a channel hands a host descriptor to the child" {
@@ -208,6 +225,7 @@ pub fn spawn(
 ) SpawnError!std.process.Child.Term {
     try iface.validate(config);
     if ((run.entry == null) == (argv.len == 0)) return error.Unexpected;
+    if (run.entry != null and config.selinux_context != null) return error.SelinuxRequiresExec;
     for (config.helpers) |helper| {
         for (helper.keep_fds) |fd| {
             if (linux.errno(linux.fcntl(fd, linux.F.GETFD, 0)) == .BADF) return error.HelperFdClosed;
@@ -1274,6 +1292,7 @@ fn setupErrorFor(step: SetupStep) SetupError {
         .mount_tree => error.MountTreeFailed,
         .pivot => error.PivotFailed,
         .capabilities => error.CapabilitiesFailed,
+        .selinux => error.SelinuxFailed,
         .landlock_init => error.LandlockInitFailed,
         .landlock_rule => error.LandlockRuleFailed,
         .landlock_restrict => error.LandlockRestrictFailed,
@@ -1739,6 +1758,21 @@ fn applyLayers(
                     "applies must fail closed",
             );
         }
+    }
+
+    if (config.selinux_context) |context| {
+        var selinux_diag: ?selinux.Diagnostic = null;
+        selinux.setExecContext(context, &selinux_diag) catch |err| {
+            if (selinux_diag) |diag| {
+                reportSetupFailure(write_fd, .selinux, @backingInt(diag.errno));
+                var buffer: [256]u8 = undefined;
+                const line = std.fmt.bufPrint(&buffer, "sandbox: {f}\n", .{diag}) catch
+                    "sandbox: the SELinux exec context could not be set\n";
+                writeStderr(config.stderr_fd, line);
+                std.process.exit(1);
+            }
+            die(write_fd, config.stderr_fd, .selinux, err);
+        };
     }
 
     var diag: ?namespace.Diagnostic = null;

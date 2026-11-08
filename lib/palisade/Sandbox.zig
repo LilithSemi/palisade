@@ -146,6 +146,9 @@ pub const Config = struct {
     stderr_fd: i32 = 2,
     hide_helpers: bool = false,
     path_audit: bool = false,
+    /// Selects an SELinux domain for the sandboxed program at `execve`.
+    /// The host policy must define and permit this transition.
+    selinux_context: ?[]const u8 = null,
 
     /// Copies every string into `allocator`. Channels and helpers are copied as new slices, but their
     /// `ptr` targets are the caller's and must outlive the copy.
@@ -155,6 +158,10 @@ pub const Config = struct {
         out.cwd = try allocator.dupe(u8, self.cwd);
         out.env = try copyStrings(allocator, self.env);
         out.deny_notice = try allocator.dupe(u8, self.deny_notice);
+        out.selinux_context = if (self.selinux_context) |context|
+            try allocator.dupe(u8, context)
+        else
+            null;
 
         const mounts = try allocator.alloc(namespace.Mount, self.mounts.len);
         for (self.mounts, mounts) |from, *to| {
@@ -783,6 +790,7 @@ pub const SetupError = error{
     MountTreeFailed,
     PivotFailed,
     CapabilitiesFailed,
+    SelinuxFailed,
     LandlockInitFailed,
     LandlockRuleFailed,
     LandlockRestrictFailed,
@@ -798,6 +806,8 @@ pub const SetupError = error{
 
 pub const SpawnError = error{
     LandlockUnavailable,
+    /// An SELinux exec context has no effect on an in-process entry callback.
+    SelinuxRequiresExec,
     /// A descriptor named in `Helper.keep_fds` is not open.
     HelperFdClosed,
     UntrustedSetupReport,
@@ -1076,6 +1086,7 @@ pub const Inexpressible = enum {
     channels,
     substitution,
     owned_directory,
+    selinux_context,
 
     pub fn text(self: Inexpressible) []const u8 {
         return switch (self) {
@@ -1087,6 +1098,7 @@ pub const Inexpressible = enum {
             .channels => "channels or helpers, and macos has no network namespace to give them",
             .substitution => "a file swapped for other content, and macos cannot mount over a path",
             .owned_directory => "a directory owned by the sandbox, and macos cannot mount over a path",
+            .selinux_context => "an SELinux exec context, and macos has no SELinux",
         };
     }
 };
@@ -1103,6 +1115,7 @@ pub fn inexpressibleOnDarwin(config: Config) ?Inexpressible {
     if (config.channels.len != 0 or config.helpers.len != 0) return .channels;
     if (config.substitutions.len != 0) return .substitution;
     if (config.owned_directories.len != 0) return .owned_directory;
+    if (config.selinux_context != null) return .selinux_context;
     for (config.mounts) |mount| switch (mount) {
         .bind => |bind| if (!std.mem.eql(u8, bind.source, bind.target)) return .bind_moves_a_path,
         .overlay => return .overlay_mount,
@@ -2044,6 +2057,24 @@ test "Config.copy copies the allowed calls of a helper" {
     const copied = try config.copy(arena_state.allocator());
     try std.testing.expect(copied.helpers[0].allowed.ptr != &allowed);
     try std.testing.expectEqualSlices(std.os.linux.SYS, &allowed, copied.helpers[0].allowed);
+}
+
+test "Config.copy owns the SELinux context" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const context = "system_u:system_r:palisade_t:s0";
+    const config: Config = .{
+        .root = "/",
+        .cwd = "/",
+        .env = &.{},
+        .mounts = &.{},
+        .rules = &.{},
+        .selinux_context = context,
+    };
+    const copied = try config.copy(arena_state.allocator());
+    try std.testing.expect(copied.selinux_context.?.ptr != context.ptr);
+    try std.testing.expectEqualStrings(context, copied.selinux_context.?);
+    try std.testing.expectEqual(Inexpressible.selinux_context, inexpressibleOnDarwin(config).?);
 }
 
 fn helperConfig(helpers: []const Helper, channels: []const Channel) Config {

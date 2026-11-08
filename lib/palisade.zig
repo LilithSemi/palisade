@@ -11,6 +11,7 @@ pub const linux = struct {
     pub const namespace = @import("palisade/linux/namespace.zig");
     pub const netns = @import("palisade/linux/netns.zig");
     pub const capabilities = @import("palisade/linux/capabilities.zig");
+    pub const selinux = @import("palisade/linux/selinux.zig");
     pub const cgroup = @import("palisade/linux/cgroup.zig");
     pub const guarantees = @import("palisade/linux/caps.zig").guarantees;
     pub const expresses = @import("palisade/linux/caps.zig").expresses;
@@ -36,6 +37,7 @@ test {
     _ = linux.namespace;
     _ = linux.netns;
     _ = linux.capabilities;
+    _ = linux.selinux;
     _ = linux.cgroup;
     _ = @import("palisade/linux/afterfork.zig");
     if (builtin.os.tag == .linux) _ = @import("palisade/linux/driver.zig");

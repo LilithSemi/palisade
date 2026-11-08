@@ -18,6 +18,18 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
+    const selinux_unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("lib/palisade/linux/selinux.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_selinux_unit_tests = b.addRunArtifact(selinux_unit_tests);
+    run_selinux_unit_tests.skip_foreign_checks = true;
+    const test_selinux_step = b.step("test-selinux", "Run SELinux unit and integration tests");
+    test_selinux_step.dependOn(&run_selinux_unit_tests.step);
+
     const test_sandbox_step = b.step("test-sandbox", "Run the probe and escape suite");
 
     const os_tag = target.result.os.tag;
@@ -25,6 +37,21 @@ pub fn build(b: *std.Build) void {
     // Linux only: every escape test asserts on a Landlock rule, a seccomp
     // filter, a namespace, or a mount. None of those exist on another target.
     if (os_tag == .linux) {
+        const selinux_integration = b.addExecutable(.{
+            .name = "palisade-selinux-integration",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/selinux_integration.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "palisade", .module = palisade }},
+            }),
+        });
+        const run_selinux_integration = b.addRunArtifact(selinux_integration);
+        // nixpkgs' refpolicy is non-MLS, so its contexts have three fields.
+        run_selinux_integration.addArg("system_u:system_r:init_t");
+        run_selinux_integration.skip_foreign_checks = true;
+        test_selinux_step.dependOn(&run_selinux_integration.step);
+
         const probe = b.addExecutable(.{
             .name = "palisade-probe",
             .root_module = b.createModule(.{
